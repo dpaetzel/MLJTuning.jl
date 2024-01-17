@@ -46,6 +46,7 @@ mutable struct DeterministicTunedModel{T,M<:DeterministicTypes} <: MLJBase.Deter
     train_best::Bool
     repeats::Int
     n::Union{Int,Nothing}
+    userextras
     acceleration::AbstractResource
     acceleration_resampling::AbstractResource
     check_measure::Bool
@@ -65,6 +66,7 @@ mutable struct ProbabilisticTunedModel{T,M<:ProbabilisticTypes} <: MLJBase.Proba
     train_best::Bool
     repeats::Int
     n::Union{Int,Nothing}
+    userextras
     acceleration::AbstractResource
     acceleration_resampling::AbstractResource
     check_measure::Bool
@@ -257,6 +259,7 @@ function TunedModel(args...; model=nothing,
                     train_best=true,
                     repeats=1,
                     n=nothing,
+                    userextras=((_, _) -> nothing),
                     acceleration=default_resource(),
                     acceleration_resampling=CPU1(),
                     check_measure=true,
@@ -336,6 +339,7 @@ function TunedModel(args...; model=nothing,
         train_best,
         repeats,
         n,
+        userextras,
         acceleration,
         acceleration_resampling,
         check_measure,
@@ -428,7 +432,8 @@ function event!(metamodel,
                verbosity,
                tuning,
                history,
-               state)
+               state,
+               userextras)
     model = _first(metamodel)
     metadata = _last(metamodel)
     resampling_machine.model.model = model
@@ -439,7 +444,9 @@ function event!(metamodel,
               measure     = E.measure,
               measurement = E.measurement,
               per_fold    = E.per_fold,
-              metadata    = metadata)
+              metadata    = metadata,
+              userextras  = userextras(model, E.fitted_params_per_fold)
+    )
     entry = merge(entry0, extras(tuning, history, state, E))
     if verbosity > 2
         println("hyperparameters: $(params(model))")
@@ -457,7 +464,8 @@ function assemble_events!(metamodels,
                          tuning,
                          history,
                          state,
-                         acceleration::CPU1)
+                         acceleration::CPU1,
+                         userextras)
 
      n_metamodels = length(metamodels)
 
@@ -471,7 +479,8 @@ function assemble_events!(metamodels,
     verbosity !=1 || update!(p,0)
 
     entries = map(metamodels) do m
-        r = event!(m, resampling_machine, verbosity, tuning, history, state)
+        r = event!(m, resampling_machine, verbosity, tuning, history, state,
+                   userextras)
         verbosity < 1 || begin
                   p.counter += 1
                   ProgressMeter.updateProgress!(p)
@@ -488,7 +497,8 @@ function assemble_events!(metamodels,
                          tuning,
                          history,
                          state,
-                         acceleration::CPUProcesses)
+                         acceleration::CPUProcesses,
+                         userextras)
 
     n_metamodels = length(metamodels)
 
@@ -512,7 +522,8 @@ function assemble_events!(metamodels,
 
 
         ret = @distributed vcat for m in metamodels
-            r = event!(m, resampling_machine, verbosity, tuning, history, state)
+            r = event!(m, resampling_machine, verbosity, tuning, history, state,
+                       userextras)
             verbosity < 1 || begin
                 put!(channel, true)
             end
@@ -533,7 +544,8 @@ function assemble_events!(metamodels,
                          tuning,
                          history,
                          state,
-                         acceleration::CPUThreads)
+                         acceleration::CPUThreads,
+                         userextras)
 
     if Threads.nthreads() == 1
         return assemble_events!(metamodels,
@@ -542,7 +554,8 @@ function assemble_events!(metamodels,
                          tuning,
                          history,
                          state,
-                         CPU1())
+                         CPU1(),
+                         userextras)
    end
 
     n_metamodels = length(metamodels)
@@ -587,7 +600,8 @@ function assemble_events!(metamodels,
             Threads.@spawn begin
                 entries[i] =  map(metamodels[parts]) do m
                     r = event!(m, machs[i],
-                              verbosity, tuning, history, state)
+                              verbosity, tuning, history, state,
+                              userextras)
                     verbosity < 1 || put!(ch, true)
                     r
                 end
@@ -617,7 +631,8 @@ function build!(history,
                state,
                verbosity,
                acceleration,
-               resampling_machine)
+               resampling_machine,
+               userextras)
     j = _length(history)
     models_exhausted = false
 
@@ -636,7 +651,8 @@ function build!(history,
                                     tuning,
                                     history,
                                     state,
-                                    acceleration)
+                                    acceleration,
+                                    userextras)
         history = _vcat(history, Δhistory)
     end
 
@@ -670,7 +686,8 @@ function build!(history,
                                    tuning,
                                    history,
                                    state,
-                                   acceleration)
+                                   acceleration,
+                                   userextras)
         history = _vcat(history, Δhistory)
         j += Δj
 
@@ -745,7 +762,8 @@ function MLJBase.fit(tuned_model::EitherTunedModel{T,M},
                           cache         = tuned_model.cache)
     resampling_machine = machine(resampler, data...; cache=false)
     history, state = build!(nothing, n, tuning, model, model_buffer, state,
-                           verbosity, acceleration, resampling_machine)
+                           verbosity, acceleration, resampling_machine,
+                           tuned_model.userextras)
 
     rm = resampling_machine
     return finalize(tuned_model, model_buffer,
@@ -780,7 +798,8 @@ function MLJBase.update(tuned_model::EitherTunedModel,
         "to search, bringing total to $n!. "
 
         history, state = build!(history, n!, tuning, model, model_buffer, state,
-                               verbosity, acceleration, resampling_machine)
+                               verbosity, acceleration, resampling_machine,
+                               tuned_model.userextras)
 
         rm = resampling_machine
         return finalize(tuned_model, model_buffer,
